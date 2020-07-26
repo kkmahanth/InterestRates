@@ -1,0 +1,487 @@
+---
+title: "BUAN6357_Project_Kattula"
+author: Karthik Mahanth Kattula
+date: "6/21/2020"
+output: pdf_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+pacman::p_load(tinytex,dplyr,e1071,dominanceanalysis,randomForest,ggpubr,DMwR,reshape2,ggplot2,leaps,caret,nnet,forecast,foreign,MASS,Hmisc,gbm)
+theme_set(theme_pubr())
+```
+
+
+```{r read Data}
+#Load the data into R and just look at the basic structure and summary of the dataset
+bank<-read.csv("train.csv",na.strings = "")
+str(bank)
+summary(bank)
+```
+
+```{r EDA}
+#Drop irrelevant variables such as Loan ID which is unique to a particular application
+#Convert integer features to numeric and character features to factor variables
+
+bank$Loan_ID<-NULL
+
+numeric_cols<-c("Loan_Amount_Requested","Annual_Income","Debt_To_Income","Inquiries_Last_6Mo",
+                "Months_Since_Deliquency","Number_Open_Accounts","Total_Accounts")
+categorical_cols<-c("Length_Employed","Home_Owner","Income_Verified","Purpose_Of_Loan","Gender",
+                    "Interest_Rate")
+
+bank[numeric_cols]<-sapply(bank[numeric_cols],as.numeric)
+bank[categorical_cols]<-lapply(bank[categorical_cols],factor)
+
+```
+#Loan ID is unique to particular application. So dropping this variable would not affect our analysis and converted all numeric features to Numeric and Character Features to Factor Variables
+
+```{r EDA}
+#Finding count of missing values in each feature
+apply(bank,2, function(col) sum(is.na(col)))
+```
+#There are 7371 missing values in Length Employed 25349 missing values in HomeOwner 25102 missing values in Annual Income and 88379 missing values in Months since delinquency
+
+```{r EDA}
+#Percentage of missing values in each feature
+apply(bank,2, function(col) sum(is.na(col))/dim(bank)[1])
+```
+
+```{r EDA}
+#We see that Months since Deliquency feature is having approximately 50% of NA values
+#Approximately half of the data is missing so we can ignore this feature. However, based on domain understanding Months since Deliquency plays a major role in deciding the interest rate category. Less the Months since Deliquency there are high chances of interest rate to be high and in some cases based on background check applicant could not get loan also. So instead of dropping this feature will create a new feature Deliquency Status to indicate whether an applicant commited crime or not
+
+bank$Deliquency_Status<-ifelse(bank$Months_Since_Deliquency>=1,1,0)
+bank$Months_Since_Deliquency<-NULL
+bank$Deliquency_Status[is.na(bank$Deliquency_Status)]<-0
+bank$Deliquency_Status<-as.factor(bank$Deliquency_Status)
+
+```
+#Approximately half of the data is missing in Months Since Delinquency feature. So ignoring this feature would not impact our analysis. However based on domain understanding Months Since Delinquency plays a major role in deciding the interest rate category. Less the months since delinquency there are high chances of interest rate to be high and in some cases based on background check applicant could not avail loan also. However, in other way we can interpret it as the person did not crommitted any crime in the past. So because of ambiguity instead of imputing or dropping ,lets create a new feature Deliquency status indication whether person has committed crime or not
+
+```{r Imputation}
+#In general we use knn Imputation for imputing the missing values
+#In our dataset approximately 15% of observations are NA's in HomeOwner, Annual Income and 5% of NA's in Length Employed.
+#But its taking approximately hours to impute and as part of this project dropping those observations
+#imputed_bank<-knnImputation(bank, k = 5)
+
+bank_nona<-bank[complete.cases(bank),]
+```
+#In general we use different imputation techniques such as central Imputation, knn Imputation for imputing missing values. However the number of missing observations when compared with actual data is small and even after dropping those few observations the sample size is considerably large enough to draw inferences about population
+
+```{r heat map}
+cormat<-round(cor(bank_nona[,c(1,4,7,8,9,10)]))
+
+get_upper_tri <- function(cormat){
+    cormat[lower.tri(cormat)]<- NA
+    return(cormat)
+  }
+
+upper_tri <- get_upper_tri(cormat)
+
+melted_cormat <- melt(upper_tri, na.rm = TRUE)
+
+ggplot(data = melted_cormat, aes(Var2, Var1, fill = value))+
+ geom_tile(color = "white")+
+ scale_fill_gradient2(low = "blue", high = "red", mid = "yellow", 
+   midpoint = 0, limit = c(-1,1), space = "Lab", 
+   name="Pearson\nCorrelation") +
+  theme_minimal()+ 
+ theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+    size = 12, hjust = 1))+
+ coord_fixed()
+
+```
+#From above heat map we can see that there is Multi Collinearity in data. We see that there is high correlation between Number of Open Accounts and Total Accounts. In such scenarios either we can transofrm data or else we can create new variables by adding these two variables. But as part of this project, I am considering Number of Open Accounts only because those accounts were currently in active status  
+
+```{r EDA  Analysis Insights}
+
+ggplot(bank_nona%>%group_by(Length_Employed)%>%summarise(counts=n()), aes(x = Length_Employed, y = counts)) +
+  geom_bar(fill = "#0073C2FF", stat = "identity") +
+  geom_text(aes(label = counts), vjust = -0.3) + ggtitle("Frequency Distribution of Employment") +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+    size = 12, hjust = 1)) +
+  theme_pubclean()
+#Most of Loan applicants have been employed for more than 10 years
+
+
+ggplot(bank_nona%>%group_by(Home_Owner)%>%summarise(counts=n()), aes(x = Home_Owner, y = counts)) +
+  geom_bar(fill = "#0073C2FF", stat = "identity") +
+  geom_text(aes(label = counts), vjust = -0.3) + ggtitle("Frequency Distribution of Home_Owner Category") +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+    size = 12, hjust = 1)) +
+  theme_pubclean()
+# The percentage of observations with other and None when compared with total data is negligible, so either we can drop them off or we can combine both of them two a new category
+
+levels(bank$Home_Owner)[levels(bank$Home_Owner)=="Other"]<-"New"
+levels(bank$Home_Owner)[levels(bank$Home_Owner)=="None"]<-"New"
+
+
+
+ggplot(bank_nona%>%group_by(Income_Verified)%>%summarise(counts=n()), aes(x = Income_Verified, y = counts)) +
+  geom_bar(fill = "#0073C2FF", stat = "identity") +
+  geom_text(aes(label = counts), vjust = -0.3) +ggtitle("Income Source Verification Distribution") +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+    size = 12, hjust = 1)) +
+  theme_pubclean()
+#Large portions of income are not verified and there are also significant number of observations where income source is verified but not income
+
+
+
+```
+#From frequency distribution of Employment we can see that most of the applicants have been employed for more than 10 years. More than 90% of the loan applicants Home Owner Category belongs to either Mortgage or Rent and there are very few observations in Other and None that belongs to Home Owner Category say approx 0.01%. So either we can drop these observations or else we can create new level by combining these two levels.As part of this project, I used second approach 
+
+```{r EDA  Analysis Insights}
+table(bank_nona$Purpose_Of_Loan)
+#We can see that credit cards and 
+
+ggplot(bank_nona%>%group_by(Purpose_Of_Loan)%>%summarise(counts=n()), aes(x = "", y = counts, fill = Purpose_Of_Loan)) +
+  geom_bar(width = 1, stat = "identity", color = "white") +
+  coord_polar("y", start = 0)+
+  labs(x = NULL, y = NULL, fill = NULL) +  theme_void()
+
+
+ggplot(bank_nona%>%group_by(Purpose_Of_Loan)%>%summarise(counts=n()), aes(x="", y=counts, fill=Purpose_Of_Loan))+
+geom_bar(width = 1, stat = "identity")
+
+#We can see that main purpose of loan are Credit card and debt consolidations 
+
+
+ggplot(bank%>%group_by(Inquiries_Last_6Mo)%>%summarise(counts=n()), aes(x = Inquiries_Last_6Mo, y = counts)) +geom_bar(fill = "#0073C2FF", stat = "identity") +
+  geom_text(aes(label = counts), vjust = -0.3) + ggtitle("Inquiries in Last 6 Months") +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+    size = 12, hjust = 1)) +
+  theme_pubclean()
+#Most of them have not made any inquiries in last 6 months. There are few who made 8 inquiries as well in last 6 months 
+
+
+ggplot(bank_nona%>%group_by(Number_Open_Accounts)%>%summarise(counts=n()), aes(x = Number_Open_Accounts, y = counts)) +geom_bar(fill = "#0073C2FF", stat = "identity") +
+  geom_text(aes(label = counts), vjust = -0.3) + ggtitle("Number of Open Accounts") +
+  theme(axis.text.x = element_text(angle = 45, vjust = 1, 
+    size = 12, hjust = 1)) +
+  theme_pubclean()
+#Most of them have more than 6 open accounts currently
+```
+#We can see that most of the loan applicants main purpose for taking loan is either credit card and debt consolidation and most of them have not made any inquiries in last 6 months but there are few who made 8 inquiries as well in last 6 months and also most of them have 6 open accounts currently. We can see that number of open accounts is highly positively Skewed. But most of Machine Learning models works well or gives better predictions if data is normally distributed. So for converting highly skewed data into Normally distributed data either we can use Logarithmic transformations or square root transfomations or else we can use exponential transformations
+
+```{r creating New Features}
+#In the starting phase of Analysis based on domain understanding we added Deliquency Status
+
+#As we have Total Accounts and Number of Open Accounts we can extract closed accounts
+bank_nona$Closed_Accounts<-bank_nona$Total_Accounts-bank_nona$Number_Open_Accounts
+
+```
+#We have Open accounts and total accounts so subtracting open accounts from total accounts would gives the number of closed accounts
+```{r Transformations}
+#Checking if there is any Skewness and if there is any skewness or if there is high variation in data we use some transformations to become normally distributed. The reason for doing the transformations is most of the Machine Learning models works well with Normally distributed data and it helps in stabilizing the variance
+
+ggplot(bank_nona, aes(x=Loan_Amount_Requested)) + 
+ geom_histogram(colour="black", fill="white") + ggtitle("Loan Amount Requested")
+
+ggplot(bank_nona, aes(x=Annual_Income)) + 
+ geom_histogram(colour="black", fill="white") + ggtitle("Annual Income")
+
+
+ggplot(bank_nona, aes(x=Debt_To_Income)) + 
+ geom_histogram(colour="black", fill="white") + ggtitle("Debt To Income")
+
+ggplot(bank_nona, aes(x=Closed_Accounts)) + 
+ geom_histogram(colour="black", fill="white") + ggtitle("Closed Accounts")
+
+
+ggplot(bank_nona, aes(x=Total_Accounts)) + 
+ geom_histogram(colour="black", fill="white") + ggtitle("Total_Accounts")
+
+
+ggplot(bank_nona, aes(x=Number_Open_Accounts)) + 
+ geom_histogram(colour="black", fill="white") + ggtitle("Number_Open_Accounts")
+
+```
+
+#We see that there is high Skewness positively skewed in Loan Amount Requested, Annual Income,  Total Accounts, Number of Open Accounts and Closed Accounts and Debt To Income Ratio is Normally Distributed. Since most of the Machine Learning Models works well with Normally Distributed Data we need to do some transformations to make the dsitribution Normal. Either we can use Log transformations or Square root transformations depending on level of Skewness and Debt to Income ratio is normally distributed it seems to be more of a normal distribution bell shaped curve
+
+```{r Outliers}
+boxplot(bank_nona$Loan_Amount_Requested,main ="Loan Amount Requested")
+boxplot(bank_nona$Annual_Income,main ="Annual Income")
+boxplot(bank_nona$Debt_To_Income,main ="Debt To Income")
+boxplot(bank_nona$Number_Open_Accounts,main ="Open Accounts")
+boxplot(bank_nona$Total_Accounts,main ="Total Accounts")
+boxplot(bank_nona$Closed_Accounts,main ="Closed Accounts")
+```
+#Outliers are observations which are going to change our predictions drastically. From the above graphs we see there are many outliers in Total Number of accounts , Closed Accounts , Open Accounts and Annual Income
+
+```{r Transformations}
+transformed_bank<-bank_nona
+transformed_bank$Annual_Income <- log10(bank_nona$Annual_Income)
+transformed_bank$Number_Open_Accounts <- sqrt(bank_nona$Number_Open_Accounts)
+transformed_bank$Total_Accounts <- sqrt(bank_nona$Total_Accounts)
+transformed_bank$Closed_Accounts <- sqrt(bank_nona$Closed_Accounts)
+transformed_bank$Loan_Amount_Requested<-sqrt(transformed_bank$Loan_Amount_Requested)
+
+hist(transformed_bank$Annual_Income,main="Annual Income")
+hist(transformed_bank$Number_Open_Accounts,main="Open Accounts")
+hist(transformed_bank$Total_Accounts,main="Total_Accounts")
+hist(transformed_bank$Closed_Accounts,main="Closed Accounts")
+hist(transformed_bank$Loan_Amount_Requested,main = "Loan Amount Requested")
+
+```
+
+#We see that after appropriate transformations data becomes approximately Normal. The distribution seems to be approximately Normal and Bell Shape Curve for all the features which are having high skewness. 
+
+```{r EDA Bivariate Analysis Insights}
+
+bank_nona%>%group_by(Length_Employed)%>%
+  summarise(Maximum_Loan_Amount=max(Loan_Amount_Requested),
+            Average=mean(Loan_Amount_Requested),
+            Minimum_Loan_Amount=min(Loan_Amount_Requested))%>%arrange(desc(Average))
+#The Maximum Loan Amount Requested across all levels of categories is same and Average Loan Amount Requested is maximum for people with 10+ years of Employment
+
+bank_nona%>%group_by(Home_Owner)%>%
+  summarise(Maximum_Loan_Amount=max(Loan_Amount_Requested),
+            Average=mean(Loan_Amount_Requested),
+            Minimum= min(Loan_Amount_Requested))%>%arrange(desc(Average))
+#The Average Loan Amount Requested is Maximum for people Home_Owner Status as Mortgage 
+
+
+bank_nona%>%group_by(Purpose_Of_Loan)%>%
+  summarise(Maximum_Loan_Amount=max(Loan_Amount_Requested),
+            Average=mean(Loan_Amount_Requested),
+            Minimum= min(Loan_Amount_Requested))%>%arrange(desc(Average))
+#The Average Loan Amount requested is highest for small business, followed by Housing and Debt Consolidation 
+bank_nona%>%group_by(Interest_Rate)%>%
+  summarise(Maximum_Loan_Amount=max(Loan_Amount_Requested),
+            Average=mean(Loan_Amount_Requested),
+            Minimum= min(Loan_Amount_Requested))%>%arrange(desc(Average))
+#There is clear distinction between three categories. The Average Loan Amount is higher for Interest Rate Category 3 and there is no much difference between the Interest Rate Category 2 and Interest Rate Category 1
+
+
+bank_nona%>%group_by(Interest_Rate)%>%
+  summarise(Maximum=max(Annual_Income),
+            Average=mean(Annual_Income),
+            Minimum= min(Annual_Income))%>%arrange(desc(Average))
+#The Average Annual Income is highest for Interest Rate Category 1 and it is almost same for Interest Rate Categories 2 and 3
+
+```
+#The maximum loan amount requested across all levels of Length Employed is same and minimum Loan amount requested is for applicants when their employment length is less than a year and average loan amount requested is maximum for applicants having employment length greater than 10 years and average loan amount requested is maximum for applicants when their Home Owner Category is Mortgage and also the average loan amount requested is maximum when the purpose of loan is small business followed by house and debt consolidation and there is no much difference in loan amount amount requested when the purpose of loan is house and debt consolidation and there is significant difference between high and low categories the average loan amount requested is higher for Interest Rate Category 3 which means Higher interest Rate and there is no significant differences in the averages of Interest Rate category Low and Medium and Average Annual Income is highest for Interest Rate category 1 low and there is no much difference between Annual income averages for Interest Rate Category high and Medium
+
+```{r Train Test Split}
+set.seed(13)
+train.index <- createDataPartition(transformed_bank$Interest_Rate, p = 0.8, list = FALSE)
+train.df <- transformed_bank[train.index, ]
+test.df <- transformed_bank[-train.index, ]
+
+```
+
+```{r Multinomial}
+train.df$resp <-relevel(train.df$Interest_Rate, ref="1")
+
+bank_nona.multinomial<-multinom(resp~Loan_Amount_Requested+Length_Employed+Home_Owner
+                                +Annual_Income+Income_Verified+Purpose_Of_Loan+Debt_To_Income+
+                                Inquiries_Last_6Mo+Number_Open_Accounts+Gender+Deliquency_Status
+                                , data=train.df)
+
+#summary(bank_nona.multinomial)
+
+
+```
+
+```{r Predictions}
+pred1 <- predict(bank_nona.multinomial, test.df)
+#prob <- predict(cardio.mnl, cardio.test, type="prob") #predicted probabilities
+
+confusionMat <- table(pred1, test.df$Interest_Rate)
+
+confusionMatrix(confusionMat)
+```
+
+
+```{r Backward Selection}
+bank.bselect <- step(bank_nona.multinomial, direction = "backward")
+bank.bselect.pred <- predict(bank.bselect, test.df)
+confusionMatrix(bank.bselect.pred, test.df$Interest_Rate)
+```
+
+```{r Forward Selection}
+bank.fselect <- step(bank_nona.multinomial, direction = "forward")
+#summary(bank.fselect)  # Which variables were dropped?
+bank.fselect.pred <- predict(bank.fselect, test.df)
+confusionMatrix(bank.fselect.pred, test.df$Interest_Rate)
+```
+
+```{r Random Forest}
+#Bagging
+rfc_bank <- randomForest(Interest_Rate~Loan_Amount_Requested+Length_Employed+Home_Owner
+                                +Annual_Income+Income_Verified+Purpose_Of_Loan+Debt_To_Income  
+                         +Inquiries_Last_6Mo+Number_Open_Accounts+Gender+Deliquency_Status, data=train.df,                                  mtry = 8, importance = TRUE) 
+
+
+
+rfc.pred <- predict(rfc_bank, newdata=test.df)
+
+confusionMatrix(rfc.pred,test.df$Interest_Rate)
+#importance(rfc_bank)
+#varImpPlot(rfc_bank)
+
+```
+
+
+```{r Linear Discriminant Analysis}
+# Normalize the data
+    # Estimate preprocessing parameters
+norm.values  <- preProcess(train.df, method = c("center", "scale"))
+    # Transform the data using the estimated parameters
+train.df.norm <- predict(norm.values, train.df)
+test.df.norm <- predict(norm.values, test.df)
+
+lda.bank <- lda(Interest_Rate~Loan_Amount_Requested+Length_Employed+Home_Owner
+                                +Annual_Income+Income_Verified+Purpose_Of_Loan+Debt_To_Income  
+                         +Inquiries_Last_6Mo+Number_Open_Accounts+Gender+Deliquency_Status, data=train.df.norm)
+
+
+
+# Predict - using Training data and plot
+bank.pred.lda <- predict(lda.bank, test.df.norm)
+
+acc <- table(test.df.norm$Interest_Rate, bank.pred.lda$class)  # pred v actual
+confusionMatrix(acc)
+
+```
+
+
+```{r One Versus Rest}
+data.onerest.low<-transformed_bank
+levels(data.onerest.low$Interest_Rate)<-c("Low","High","High")
+set.seed(42)
+train.index <- createDataPartition(data.onerest.low$Interest_Rate, p = 0.8, list = FALSE)
+train.df <- data.onerest.low[train.index, ]
+test.df <- data.onerest.low[-train.index, ]
+
+```
+
+```{r One Versus Rest}
+logit.reg.low <- glm(Interest_Rate ~ Loan_Amount_Requested+Length_Employed+Home_Owner
+                                +Annual_Income+Income_Verified+Purpose_Of_Loan+Debt_To_Income  
+                         +Inquiries_Last_6Mo+Number_Open_Accounts+Gender+Deliquency_Status, data = train.df, family = "binomial") 
+logit.reg.low.pred <- predict(logit.reg.low, test.df, type = "response")
+
+#confusionMatrix(logit.reg.low.pred,test.df$Interest_Rate)
+table(test.df$Interest_Rate , logit.reg.low.pred > 0.5)
+#confusionMatrix(factor(logit.reg.low.pred,levels = c("1","3")),factor(test.df$Interest_Rate,levels = c("1","3")))
+```
+```{r Adjusting Thresholds}
+table(test.df$Interest_Rate , logit.reg.low.pred > 0.2)
+```
+
+```{r One versus Rest High}
+data.onerest.high<-transformed_bank
+levels(data.onerest.high$Interest_Rate)<-c("Low","Low","High")
+set.seed(42)
+train.index <- createDataPartition(data.onerest.high$Interest_Rate, p = 0.8, list = FALSE)
+train.df <- data.onerest.high[train.index, ]
+test.df <- data.onerest.high[-train.index, ]
+```
+
+
+```{r One Versus Rest}
+logit.reg.high <- glm(Interest_Rate ~ Loan_Amount_Requested+Length_Employed+Home_Owner
+                                +Annual_Income+Income_Verified+Purpose_Of_Loan+Debt_To_Income  
+                         +Inquiries_Last_6Mo+Number_Open_Accounts+Gender+Deliquency_Status, data = train.df, family = "binomial") 
+logit.reg.high.pred <- predict(logit.reg.high, test.df, type = "response")
+
+
+table(test.df$Interest_Rate , logit.reg.high.pred > 0.5)
+```
+
+```{r }
+table(test.df$Interest_Rate , logit.reg.high.pred > 0.1)
+```
+```{r Dominance Analysis}
+low.features<-dominanceAnalysis(logit.reg.low)
+plot(low.features, which.graph ="general",fit.function = "r2.m")
+```
+
+```{r Dominance Analysis}
+high.features<-dominanceAnalysis(logit.reg.high)
+plot(high.features,which.graph="general",fit.function="r2.m")
+```
+
+```{r Feature Importance}
+low.interest.Imp<-varImp(logit.reg.low,scale=F)
+low.interest.Imp%>%slice_max(Overall,n=10)
+```
+
+```{r Feature Importance}
+high.interest.imp<-varImp(logit.reg.high,scale=F)
+high.interest.imp%>%slice_max(Overall,n=10)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
